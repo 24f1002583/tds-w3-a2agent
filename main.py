@@ -3,6 +3,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
+import time
 
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 log = logging.getLogger("a2a")
@@ -94,7 +95,7 @@ def call_model(policy, items):
               "response_format": {"type": "json_object"},
               "messages": [{"role": "system", "content": SYSTEM},
                            {"role": "user", "content": user}]},
-        timeout=32,
+        timeout=25,
     )
     if r.status_code >= 400:
         log.info("MODEL HTTP %s: %s", r.status_code, r.text[:500])
@@ -164,8 +165,9 @@ def decide_all(data, pkgs):
         if row:
             out[k] = json.loads(row[0])
     todo = [i for i, k in enumerate(keys) if k not in out]
+    t0 = time.time()
     for attempt in range(2):
-        if not todo:
+        if not todo or (attempt == 1 and time.time() - t0 > 12):
             break
         items = [{"n": i, "package": pkgs[i]} for i in todo]
         try:
