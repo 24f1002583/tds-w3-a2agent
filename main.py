@@ -96,7 +96,9 @@ def call_model(policy, items):
                            {"role": "user", "content": user}]},
         timeout=32,
     )
-    r.raise_for_status()
+    if r.status_code >= 400:
+        log.info("MODEL HTTP %s: %s", r.status_code, r.text[:500])
+        r.raise_for_status()
     text = r.json()["choices"][0]["message"]["content"]
     text = re.sub(r"^```(?:json)?|```$", "", text.strip()).strip()
     return json.loads(text)["decisions"]
