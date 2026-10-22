@@ -15,7 +15,7 @@ ACTIONS = ["create_draft", "update_internal_record", "send_approved_notice",
 AI_URL = os.environ.get("AI_URL", "")
 AI_KEY = os.environ.get("AIPIPE_TOKEN", "")
 MODEL = os.environ.get("MODEL", "gemini-3.5-flash-lite")
-CHUNK = 15
+CHUNK = 10
 
 lock = threading.RLock()
 db = sqlite3.connect("mailroom.db", check_same_thread=False)
@@ -138,7 +138,7 @@ def render(d):
 
 def call_model(chunk, timeout):
     r = httpx.post(AI_URL, headers={"Authorization": "Bearer " + AI_KEY},
-                   json={"model": MODEL, "temperature": 0, "max_tokens": 9000,
+                   json={"model": MODEL, "temperature": 0, "reasoning_effort": "low", "max_tokens": 9000,
                          "response_format": {"type": "json_object"},
                          "messages": [{"role": "system", "content": SYSTEM},
                                       {"role": "user", "content": "\n\n".join(render(d) for d in chunk)}]},
@@ -215,20 +215,28 @@ def fallback(d):
 def run_chunk(chunk, deadline):
     left = deadline - time.time()
     if left < 5:
+        log.info("CHUNK skipped: no time left")
         return []
+    t = time.time()
     try:
         raw = call_model(chunk, min(40, left))
     except Exception as e:
-        log.info("model error: %r", e)
+        log.info("CHUNK model error: %r", e)
         return []
     by_id = {d["dossierId"]: d for d in chunk}
-    res = []
+    res, bad = [], 0
     for r in raw:
         d = by_id.get(r.get("dossierId")) if isinstance(r, dict) else None
         if d:
             v = check_decision(r, d)
             if v:
                 res.append((fingerprint(d), v))
+            else:
+                bad += 1
+                if bad <= 3:
+                    log.info("REJECTED DECISION: %s", json.dumps(r)[:400])
+    log.info("CHUNK size=%d ok=%d bad=%d returned=%d secs=%.1f",
+             len(chunk), len(res), bad, len(raw), time.time() - t)
     return res
 
 def decide(dossiers):
@@ -244,12 +252,14 @@ def decide(dossiers):
         if not todo or time.time() > deadline - 8:
             break
         chunks = [todo[i:i + CHUNK] for i in range(0, len(todo), CHUNK)]
-        with ThreadPoolExecutor(max_workers=4) as ex:
+        with ThreadPoolExecutor(max_workers=6) as ex:
             for res in ex.map(lambda c: run_chunk(c, deadline), chunks):
                 for fp, v in res:
                     out[fp] = v
                     db.execute("insert or replace into decisions values (?,?)", (fp, json.dumps(v)))
         db.commit()
+    log.info("DECIDE total=%d fallbacks=%d", len(dossiers),
+             sum(1 for fp in fps if fp not in out))
     return [out.get(fp) or fallback(d) for d, fp in zip(dossiers, fps)]
 
 # ---------- receipt signature ----------
@@ -286,6 +296,7 @@ def handle_propose(body):
                 return fail(409, "CONFLICT", "evaluation id reused with different content")
             return JSONResponse(json.loads(row[1]))
         dossiers = body["dossiers"]
+        log.info("SAMPLE DOSSIER: %s", json.dumps(dossiers[0], ensure_ascii=False)[:3000])
         decisions = decide(dossiers)
         proposals = [{"dossierId": d["dossierId"], "callId": call_id(d), "action": x["action"],
                       "target": x["target"], "payload": x["payload"], "evidence": x["evidence"]}
@@ -309,6 +320,9 @@ def handle_commit(body):
         digest, verifier, resp, c_hash, c_resp = row
         if c_resp:
             if c_hash != h:
+                jwk0 = json.loads(verifier)
+                if not all(verify_receipt(jwk0, eid, body["inputDigest"], r) for r in body["receipts"]):
+                    return fail(400, "INVALID_RECEIPT", "receipt rejected")
                 return fail(409, "CONFLICT", "commit already recorded with different content")
             return JSONResponse(json.loads(c_resp))
         if body["inputDigest"] != digest:
