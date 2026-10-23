@@ -204,6 +204,7 @@ def normalize(action, target, payload, dossier, text):
     if not isinstance(payload, dict):
         return None
     payload = dict(payload)
+    payload = {str(k).strip(): (v.strip() if isinstance(v, str) else v) for k, v in payload.items()}
     if action == "update_internal_record" and "value" not in payload and "delivery_window" in payload:
         payload["value"] = payload["delivery_window"]
     payload.update(FIXED.get(action, {}))
@@ -348,6 +349,17 @@ def decide(dossiers):
                                (VERSION + fp, json.dumps(v)))
         db.commit()
     log.info("DECIDE total=%d fallbacks=%d", len(dossiers), sum(1 for fp in fps if fp not in out))
+    seen = set()
+    for d, fp in zip(dossiers, fps):
+        x = out.get(fp)
+        key = (x["action"], d.get("partition")) if x else None
+        if x and key not in seen:
+            seen.add(key)
+            inv = {v: k for k, v in alias_map(d).items()}
+            log.info("DEBUGCASE action=%s partition=%s\n%s\nDECISION target=%s payload=%s evidence=%s",
+                     x["action"], d.get("partition"), render(0, d),
+                     json.dumps(x["target"]), json.dumps(x["payload"]),
+                     [inv.get(e) for e in x["evidence"]])
     return [out.get(fp) or fallback(d) for d, fp in zip(dossiers, fps)]
 
 # ---------- receipt signature ----------
