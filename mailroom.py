@@ -16,7 +16,7 @@ AI_URL = os.environ.get("AI_URL", "")
 AI_KEY = os.environ.get("AIPIPE_TOKEN", "")
 MODEL = os.environ.get("MODEL", "gemini-3.5-flash-lite")
 MODEL2 = os.environ.get("MODEL2", "gemini-3.5-flash")
-VERSION = "v4:"   # bump this whenever the prompt changes, so old cached decisions are ignored
+VERSION = "v5:"   # bump this whenever the prompt changes, so old cached decisions are ignored
 
 lock = threading.RLock()
 db = sqlite3.connect("mailroom.db", check_same_thread=False)
@@ -367,8 +367,6 @@ def check_decision(raw, d):
             return None
         ids = fix_evidence(n[0], n[1], ids, d)
         better = refine(action, n[0], n[1], d)
-        if better:
-            ids = better
         return {"action": action, "target": n[0], "payload": n[1], "evidence": ids}
     except Exception:
         return None
@@ -442,14 +440,14 @@ def decide(dossiers):
     seen = set()
     for d, fp in zip(dossiers, fps):
         x = out.get(fp)
-        key = (x["action"], d.get("partition")) if x else None
-        if x and key not in seen:
-            seen.add(key)
+        if x and d.get("partition") == "fresh_audit" and x["action"] not in seen:
+            seen.add(x["action"])
             inv = {v: k for k, v in alias_map(d).items()}
-            # log.info("DEBUGCASE action=%s partition=%s\n%s\nDECISION target=%s payload=%s evidence=%s",
-            #          x["action"], d.get("partition"), render(0, d),
-            #          json.dumps(x["target"]), json.dumps(x["payload"]),
-            #          [inv.get(e) for e in x["evidence"]])
+            log.info("DEBUGCASE %s", json.dumps({
+                "dossier": render(0, d).replace("\n", " ¦ "),
+                "target": x["target"], "payload": x["payload"],
+                "evidence": [inv.get(e) for e in x["evidence"]]}, ensure_ascii=False))
+    log.info("DECIDE total=%d fallbacks=%d", len(dossiers), sum(1 for fp in fps if fp not in out))
     return [out.get(fp) or fallback(d) for d, fp in zip(dossiers, fps)]
 
 # ---------- receipt signature ----------
