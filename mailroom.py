@@ -16,7 +16,7 @@ AI_URL = os.environ.get("AI_URL", "")
 AI_KEY = os.environ.get("AIPIPE_TOKEN", "")
 MODEL = os.environ.get("MODEL", "gemini-3.5-flash-lite")
 MODEL2 = os.environ.get("MODEL2", "gemini-3.5-flash")
-VERSION = "v3:"   # bump this whenever the prompt changes, so old cached decisions are ignored
+VERSION = "v4:"   # bump this whenever the prompt changes, so old cached decisions are ignored
 
 lock = threading.RLock()
 db = sqlite3.connect("mailroom.db", check_same_thread=False)
@@ -257,6 +257,93 @@ def fix_evidence(target, payload, ids, d):
         keep.append(i)
     return keep or ids
 
+def flat(d):
+    return [(s, l) for s in d["sources"] for l in s["lines"]]
+
+def txt(d, lid):
+    for _, l in flat(d):
+        if l["lineId"] == lid:
+            return l["text"]
+    return ""
+
+def pick(d, pred, kinds=None):
+    for s, l in flat(d):
+        if s.get("kind") in ("history", "secret"):
+            continue
+        if kinds and s.get("kind") not in kinds:
+            continue
+        if pred(l["text"]):
+            return l["lineId"]
+    return None
+
+def next_line(d, lid):
+    for s in d["sources"]:
+        ls = s["lines"]
+        for i, l in enumerate(ls):
+            if l["lineId"] == lid and i + 1 < len(ls):
+                return ls[i + 1]["lineId"]
+    return None
+
+def uniq(xs):
+    out = []
+    for x in xs:
+        if x and x not in out:
+            out.append(x)
+    return out
+
+def refine(action, target, payload, d):
+    """Rebuild evidence (and the no_action reason) from the template patterns. None = keep model's."""
+    ref = payload.get("referenceId", "")
+    if action == "no_action":
+        rec = pick(d, lambda t: "records this item as" in t, ("record",))
+        if rec:
+            payload["reasonCode"] = "DUPLICATE" if "as duplicate" in txt(d, rec) else "ALREADY_COMPLETED"
+        rule = pick(d, lambda t: "second side effect" in t or "requires no additional effect" in t, ("policy",))
+        msg = pick(d, lambda t: ref and ref in t, ("message",))
+        ev = uniq([rule, rec, msg])
+        return ev if rule and rec else None
+    if action == "update_internal_record":
+        sid, val = payload.get("sourceEventId", ""), payload.get("value", "")
+        evl = pick(d, lambda t: sid in t and val in t, ("event",))
+        if not evl:
+            return None
+        rule = pick(d, lambda t: re.search(r"carrier (change|event)", t) and
+                    ("only" in t or "solely" in t), ("policy",))
+        return uniq([evl, next_line(d, evl), rule])
+    if action == "send_approved_notice":
+        rcp, st = target["id"], payload.get("status", "")
+        appr = pick(d, lambda t: rcp in t and ref in t, ("approval",))
+        rec = pick(d, lambda t: ref in t and st in t, ("record",))
+        if not (appr and rec):
+            return None
+        return uniq([appr, next_line(d, appr), rec])
+    if action == "quarantine_item":
+        art = payload.get("artifactId", "")
+        att = []
+        for s, l in flat(d):
+            if (s.get("kind") == "attachment" and s.get("provenance") == "external_untrusted"
+                    and "Archived training" not in l["text"]):
+                att.append(l["lineId"])
+        rule = pick(d, lambda t: re.search(r"Quarantine external|security holding area|exfiltrate", t), ("policy",))
+        if not att or not any(art in txt(d, a) for a in att):
+            return None
+        return uniq(att + [rule])
+    if action == "create_draft":
+        rcp, st = payload.get("recipient", ""), payload.get("status", "")
+        pol = pick(d, lambda t: "create a draft" in t, ("policy",))
+        rec = pick(d, lambda t: ref in t and st in t, ("record",))
+        m1 = pick(d, lambda t: ref in t, ("message",))
+        m2 = pick(d, lambda t: rcp in t, ("message",))
+        return uniq([pol, rec, m1, m2]) if pol and rec else None
+    if action == "request_confirmation":
+        cs = payload.get("claimedSender", "")
+        ident = pick(d, lambda t: cs in t, ("record",))
+        msg = pick(d, lambda t: cs in t, ("message",))
+        rule = pick(d, lambda t: "owning approval queue" in t, ("policy",))
+        rl = pick(d, lambda t: ref in t, ("message",))
+        return uniq([ident, msg, rule, rl]) if ident and rule else None
+    return None
+
 def check_decision(raw, d):
     try:
         action = raw.get("action")
@@ -279,6 +366,9 @@ def check_decision(raw, d):
         if n is None:
             return None
         ids = fix_evidence(n[0], n[1], ids, d)
+        better = refine(action, n[0], n[1], d)
+        if better:
+            ids = better
         return {"action": action, "target": n[0], "payload": n[1], "evidence": ids}
     except Exception:
         return None
@@ -356,10 +446,10 @@ def decide(dossiers):
         if x and key not in seen:
             seen.add(key)
             inv = {v: k for k, v in alias_map(d).items()}
-            log.info("DEBUGCASE action=%s partition=%s\n%s\nDECISION target=%s payload=%s evidence=%s",
-                     x["action"], d.get("partition"), render(0, d),
-                     json.dumps(x["target"]), json.dumps(x["payload"]),
-                     [inv.get(e) for e in x["evidence"]])
+            # log.info("DEBUGCASE action=%s partition=%s\n%s\nDECISION target=%s payload=%s evidence=%s",
+            #          x["action"], d.get("partition"), render(0, d),
+            #          json.dumps(x["target"]), json.dumps(x["payload"]),
+            #          [inv.get(e) for e in x["evidence"]])
     return [out.get(fp) or fallback(d) for d, fp in zip(dossiers, fps)]
 
 # ---------- receipt signature ----------
