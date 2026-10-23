@@ -16,6 +16,7 @@ AI_URL = os.environ.get("AI_URL", "")
 AI_KEY = os.environ.get("AIPIPE_TOKEN", "")
 MODEL = os.environ.get("MODEL", "gemini-3.5-flash-lite")
 CHUNK = 10
+MODEL2 = os.environ.get("MODEL2", "gemini-3.5-flash")
 
 lock = threading.RLock()
 db = sqlite3.connect("mailroom.db", check_same_thread=False)
@@ -32,6 +33,7 @@ def sha(x):
     return hashlib.sha256(canon(x).encode("utf-8")).hexdigest()
 
 def fail(status, code, msg):
+    log.info("FAIL %s %s: %s", status, code, msg)
     return JSONResponse({"error": {"code": code, "message": msg}}, status_code=status)
 
 def fingerprint(d):
@@ -136,9 +138,9 @@ def render(d):
             out.append("  %s :: %s" % (l["lineId"], l["text"]))
     return "\n".join(out)
 
-def call_model(chunk, timeout):
+def call_model(chunk, timeout, model=None):
     r = httpx.post(AI_URL, headers={"Authorization": "Bearer " + AI_KEY},
-                   json={"model": MODEL, "temperature": 0, "reasoning_effort": "low", "max_tokens": 9000,
+                   json={"model": model or MODEL, "temperature": 0, "reasoning_effort": "low", "max_tokens": 9000,
                          "response_format": {"type": "json_object"},
                          "messages": [{"role": "system", "content": SYSTEM},
                                       {"role": "user", "content": "\n\n".join(render(d) for d in chunk)}]},
@@ -213,15 +215,21 @@ def fallback(d):
             "evidence": [first] if first else []}
 
 def run_chunk(chunk, deadline):
-    left = deadline - time.time()
-    if left < 5:
-        log.info("CHUNK skipped: no time left")
-        return []
+    raw = None
     t = time.time()
-    try:
-        raw = call_model(chunk, min(40, left))
-    except Exception as e:
-        log.info("CHUNK model error: %r", e)
+    models = [MODEL, MODEL2]
+    for attempt in range(4):
+        left = deadline - time.time()
+        if left < 6:
+            break
+        try:
+            raw = call_model(chunk, min(35, left), models[attempt % 2])
+            break
+        except Exception as e:
+            log.info("CHUNK attempt %d error: %r", attempt, e)
+            time.sleep(1.5)
+    if raw is None:
+        log.info("CHUNK gave up")
         return []
     by_id = {d["dossierId"]: d for d in chunk}
     res, bad = [], 0
