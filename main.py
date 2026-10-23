@@ -13,6 +13,9 @@ app = FastAPI()
 from mailroom import router
 app.include_router(router)
 
+from incident import router as incident_router
+app.include_router(incident_router)
+
 BASE_URL = os.environ["BASE_URL"]
 AIPIPE_TOKEN = os.environ.get("AIPIPE_TOKEN", "")
 AI_URL = os.environ.get("AI_URL", "https://aipipe.org/openrouter/v1/chat/completions")
