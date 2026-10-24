@@ -3,6 +3,7 @@ import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 log = logging.getLogger("inc")
 router = APIRouter()
@@ -205,21 +206,27 @@ def fallback_args(schema, b):
 def make_plan(b):
     sec = [s for s in strings(b.get("sensitive", {}), []) + strings(b["policy"].get("doNotExport", []), [])
            if len(s) >= 6]
-    deadline = time.time() + 14
-    for model in (MODEL, MODEL2, MODEL):
-        left = deadline - time.time()
-        if left < 4:
-            break
-        try:
-            raw = call_model(b, model, min(10, left))
-        except Exception as e:
-            log.info("plan attempt error: %r", e)
-            time.sleep(0.5)
-            continue
-        plan = validate_plan(raw, b, sec)
-        if plan:
-            return plan, model
-        log.info("plan rejected by validator")
+    deadline = time.time() + 16
+    def attempt(model):
+        raw = call_model(b, model, 15)
+        return validate_plan(raw, b, sec), model
+    ex = ThreadPoolExecutor(max_workers=2)
+    futs = [ex.submit(attempt, m) for m in (MODEL, MODEL2)]
+    try:
+        for f in as_completed(futs, timeout=max(1, deadline - time.time())):
+            try:
+                p, m = f.result()
+            except Exception as e:
+                log.info("plan attempt error: %r", e)
+                continue
+            if p:
+                log.info("PLAN OK model=%s", m)
+                ex.shutdown(wait=False)
+                return p, m
+            log.info("plan rejected by validator")
+    except Exception as e:
+        log.info("plan wait ended: %r", e)
+    ex.shutdown(wait=False)
     # safety net: valid shape, weak content
     ids = list(dict.fromkeys(re.findall(r"(?m)^\s*\[([^\]\s]+)\]", b["incident"]["transcript"])))[:2] or ["unknown"]
     cat = {t["name"]: t for t in b["toolCatalog"]}
