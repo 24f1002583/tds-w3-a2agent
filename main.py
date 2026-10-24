@@ -47,6 +47,12 @@ def err(code, msg, status):
 def canon(x):
     return json.dumps(x, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
+def check_media(request: Request):
+    ct = request.headers.get("content-type", "").split(";")[0].strip().lower()
+    if ct != "application/a2a+json":
+        return err("UNSUPPORTED_MEDIA_TYPE", "content type must be application/a2a+json", 415)
+    return None
+
 def check_headers(request: Request):
     auth = request.headers.get("authorization", "")
     if not auth.startswith("Bearer ") or not auth[7:].strip():
@@ -312,6 +318,9 @@ def process_message(principal, msg, mid):
 @app.post("/a2a/message:send")
 async def message_send(request: Request):
     principal, bad = check_headers(request)
+    if bad:
+        return bad
+    bad = check_media(request)
     if bad:
         return bad
     try:
