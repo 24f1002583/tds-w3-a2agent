@@ -206,9 +206,9 @@ def fallback_args(schema, b):
 def make_plan(b):
     sec = [s for s in strings(b.get("sensitive", {}), []) + strings(b["policy"].get("doNotExport", []), [])
            if len(s) >= 6]
-    deadline = time.time() + 16
+    deadline = time.time() + 14
     def attempt(model):
-        raw = call_model(b, model, 15)
+        raw = call_model(b, model, 12)
         return validate_plan(raw, b, sec), model
     ex = ThreadPoolExecutor(max_workers=2)
     futs = [ex.submit(attempt, m) for m in (MODEL, MODEL2)]
@@ -384,6 +384,7 @@ def build_otlp(st):
                                "scopeSpans": [{"scope": {"name": "ga5.incident"}, "spans": spans}]}]}
 
 # ---------- handlers ----------
+t_req = time.time()
 def handle_start(b, tp_header, ts_header):
     rid, h = b["runId"], sha(b)
     with lock:
@@ -429,6 +430,8 @@ def handle_start(b, tp_header, ts_header):
         st["last"] = view(st, new, [])
         db.execute("insert into runs values (?,?,?)", (rid, h, json.dumps(st)))
         db.commit()
+        log.info("START took=%.1fs model=%s resp=%s", time.time() - t_req, model,
+                 json.dumps(st["last"], ensure_ascii=False)[:2500])
         return jr(st["last"])
 
 def handle_receipt(rid, b):
@@ -521,6 +524,7 @@ async def start(request: Request):
         return bad(400)
     if validate_start(b):
         return bad(400)
+    log.info("START keys=%s tp=%s", sorted(b.keys()), request.headers.get("traceparent"))
     return await run_in_threadpool(handle_start, b, request.headers.get("traceparent"),
                                    request.headers.get("tracestate"))
 
